@@ -81,6 +81,7 @@ const PROFILE_RUNTIME_SETTINGS = Object.freeze({
   })
 });
 export const INSTALL_PROFILES = Object.freeze(["small", "medium", "large", "light", "standard"]);
+export const CONTAINER_ENGINES = Object.freeze(["docker", "podman"]);
 export const PROFILE_REQUIREMENTS = Object.freeze({
   small: { cpuCount: 4, memoryBytes: 7 * 1024 ** 3, freshDiskBytes: 6.5 * 1024 ** 3 },
   medium: { cpuCount: 4, memoryBytes: 11 * 1024 ** 3, freshDiskBytes: 8 * 1024 ** 3 },
@@ -131,6 +132,7 @@ const CONFIG_KEYS = new Set([
   "workspaces",
   "companionsEnabled",
   "optionalModules",
+  "containerEngine",
   "installId",
   "users"
 ]);
@@ -195,6 +197,23 @@ export function resolveInstallAccessMode(requestedMode, existingMode = "isolated
     return requestedMode;
   }
   throw new Error("Install access mode must be isolated or host-root.");
+}
+
+export function resolveContainerEngine(requestedEngine, existingEngine = "docker") {
+  if (requestedEngine === undefined || requestedEngine === "auto") {
+    return existingEngine ?? "docker";
+  }
+  if (requestedEngine === "docker" || requestedEngine === "podman") {
+    return requestedEngine;
+  }
+  throw new Error("Container engine must be auto, docker, or podman.");
+}
+
+export function podmanUnshareChownArgs(hostPath, { uid = 10001, gid = 10001 } = {}) {
+  if (typeof hostPath !== "string" || !isAbsolute(hostPath)) {
+    throw new Error("Host path for rootless Podman UID mapping must be absolute.");
+  }
+  return ["unshare", "chown", "-R", `${uid}:${gid}`, resolve(hostPath)];
 }
 
 export function versionTuple(version) {
@@ -311,13 +330,15 @@ export function createDefaultConfig({
   version,
   profile = "light",
   accessMode = "isolated",
-  companionsEnabled = false
+  companionsEnabled = false,
+  containerEngine
 }) {
   assertVersion(version);
   if (!INSTALL_PROFILES.includes(profile)) {
     throw new Error("Default config requires a resolved installation profile.");
   }
   const resolvedAccessMode = resolveInstallAccessMode(accessMode);
+  const resolvedEngine = containerEngine === undefined ? undefined : resolveContainerEngine(containerEngine);
   return {
     schemaVersion: CONFIG_SCHEMA_VERSION,
     version,
@@ -328,6 +349,7 @@ export function createDefaultConfig({
     profile,
     accessMode: resolvedAccessMode,
     companionsEnabled,
+    ...(resolvedEngine ? { containerEngine: resolvedEngine } : {}),
     optionalModules: "none",
     workspaces: []
   };
@@ -372,6 +394,9 @@ export function validateConfig(config) {
   }
   if (config.optionalModules !== undefined && !OPTIONAL_MODULES_PATTERN.test(config.optionalModules)) {
     throw new Error("optionalModules must be all, none or a comma-separated list of module names.");
+  }
+  if (config.containerEngine !== undefined && config.containerEngine !== "docker" && config.containerEngine !== "podman") {
+    throw new Error("containerEngine must be docker or podman.");
   }
   // Optional: only installations whose owner said Yes to telemetry have one.
   if (config.installId !== undefined && (typeof config.installId !== "string" || !/^[A-Za-z0-9_-]{8,64}$/.test(config.installId))) {
@@ -909,7 +934,11 @@ export function composeCommand(action, root, options = {}) {
   if (!selected) {
     throw new Error(`Unsupported Compose action "${action}".`);
   }
-  return { command: "docker", args: [...base, ...selected] };
+  const engine = options.containerEngine ?? options.engine ?? "docker";
+  if (engine !== "docker" && engine !== "podman") {
+    throw new Error(`Unsupported container engine "${engine}".`);
+  }
+  return { command: engine, args: [...base, ...selected] };
 }
 
 export function composeProjectName(root) {
@@ -984,7 +1013,8 @@ export async function prepareInstallation(root, {
   version,
   profile,
   accessMode,
-  companionsEnabled
+  companionsEnabled,
+  containerEngine
 }) {
   validateHome(root);
   await mkdir(root, { recursive: true, mode: 0o700 });
@@ -1026,6 +1056,12 @@ export async function prepareInstallation(root, {
   }
   if (companionsEnabled !== undefined && config.companionsEnabled !== companionsEnabled) {
     config = { ...config, companionsEnabled };
+  }
+  if (containerEngine !== undefined) {
+    const resolvedEngine = resolveContainerEngine(containerEngine, config.containerEngine);
+    if (config.containerEngine !== resolvedEngine) {
+      config = { ...config, containerEngine: resolvedEngine };
+    }
   }
   validateConfig(config);
 
