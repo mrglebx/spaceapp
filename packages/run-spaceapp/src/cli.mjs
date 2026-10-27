@@ -34,6 +34,8 @@ import {
   removeCredential,
   removeUser,
   removeWorkspace,
+  podmanUnshareChownArgs,
+  resolveContainerEngine,
   resolveInstallAccessMode,
   resolveInstallProfile,
   resolveSpaceAppHome,
@@ -50,6 +52,7 @@ import {
 } from "./index.mjs";
 import { inspectStoragePlan, storageChecks } from "./storage.mjs";
 import {
+  detectContainerEngine,
   ensureDockerAvailable,
   prepareDockerCliPath,
   windowsPowerShellArgs
@@ -81,6 +84,7 @@ const SETUP_STATUS_TIMEOUT_MS = 10_000;
 const trustedCommands = new Set([
   "codesign",
   "docker",
+  "podman",
   "hdiutil",
   "open",
   "powershell.exe",
@@ -293,7 +297,8 @@ export async function run(argv, {
     plan: false,
     nonInteractive: false,
     logFile: null,
-    answersFile: null
+    answersFile: null,
+    engine: env?.SPACEAPP_CONTAINER_ENGINE
   };
   const filteredArgv = [];
   for (let i = 0; i < argv.length; i++) {
@@ -314,6 +319,10 @@ export async function run(argv, {
       globalFlags.answersFile = argv[++i];
     } else if (arg.startsWith("--answers=")) {
       globalFlags.answersFile = arg.slice("--answers=".length);
+    } else if (arg === "--engine" && i + 1 < argv.length) {
+      globalFlags.engine = argv[++i];
+    } else if (arg.startsWith("--engine=")) {
+      globalFlags.engine = arg.slice("--engine=".length);
     } else {
       filteredArgv.push(arg);
     }
@@ -344,7 +353,7 @@ export async function run(argv, {
   if (globalFlags.localImages) {
     const originalExecute = execute;
     execute = async (spec, io) => {
-      if (spec.command === "docker" && spec.args?.includes("compose")) {
+      if ((spec.command === "docker" || spec.command === "podman") && spec.args?.includes("compose")) {
         if (spec.args.at(-1) === "pull") {
           stdout.write("Local images only: skipping registry downloads; missing images will fail startup.\n");
           return 0;
@@ -424,9 +433,10 @@ export async function run(argv, {
   if (commandNeedsRuntimeFiles(command, args)) {
     await writeRuntimeFiles(root, config);
   }
+  const activeEngine = resolveContainerEngine(globalFlags.engine, config.containerEngine);
   const runtimeExecute = (spec, io) => executeWithDockerDiagnostics(
     execute,
-    spec,
+    activeEngine === "podman" && spec.command === "docker" ? { ...spec, command: "podman" } : spec,
     io,
     { platform, stderr }
   );
@@ -1811,7 +1821,7 @@ async function workspaceCommand(rawArgs, { root, config, platform, stdin, stdout
     await saveConfig(root, updated);
     await writeRuntimeFiles(root, updated);
     stdout.write(`Workspace registered: ${identity}\n`);
-    if (platform === "linux" && !readOnly) await writeAccessHint(identity, stdout);
+    if (platform === "linux" && !readOnly) await writeAccessHint(identity, stdout, { containerEngine: resolveContainerEngine(updated.containerEngine) });
     return applyWorkspaces(updated);
   }
   if (action === "remove") {
@@ -1836,9 +1846,18 @@ async function workspaceCommand(rawArgs, { root, config, platform, stdin, stdout
 
 // The CLIs run as uid 10001 in Docker; on Linux a bind-mounted folder keeps its host owner, so they cannot write to it.
 const CLI_UID = 10001;
-async function writeAccessHint(hostPath, stdout) {
+async function writeAccessHint(hostPath, stdout, { containerEngine = "docker" } = {}) {
   const info = await stat(hostPath);
   if (info.uid === CLI_UID || (info.mode & 0o002) !== 0) return;
+  if (containerEngine === "podman") {
+    const args = podmanUnshareChownArgs(hostPath, { uid: CLI_UID, gid: CLI_UID });
+    stdout.write(
+      `The AI CLIs run as uid ${CLI_UID} inside rootless Podman. Map the workspace ownership in your user namespace without root:\n` +
+      `  podman ${args.slice(0, -1).join(" ")} ${JSON.stringify(args.at(-1))}\n` +
+      "(or add --read-only if the AI CLIs should only read)\n"
+    );
+    return;
+  }
   const owner = process.getuid?.() ?? info.uid;
   stdout.write(
     `The AI CLIs run as uid ${CLI_UID} and cannot write to this folder yet. Give them access without changing its owner:\n` +
@@ -2434,10 +2453,13 @@ async function doctor({
     ...(storagePlan ? storageChecks(storagePlan, detectedResources) : [])
   ];
   const dockerResults = [];
+  const existingForDoctor = await loadConfig(root).catch(() => null);
+  const doctorEngine = existingForDoctor?.containerEngine === "podman" || process.env.SPACEAPP_CONTAINER_ENGINE === "podman" ? "podman" : "docker";
+  const engineLabel = doctorEngine === "podman" ? "Podman" : "Docker";
   for (const probe of [
-    { name: "Docker CLI", command: "docker", args: ["--version"] },
-    { name: "Docker Compose", command: "docker", args: ["compose", "version"] },
-    { name: "Docker Engine", command: "docker", args: ["info"] }
+    { name: `${engineLabel} CLI`, command: doctorEngine, args: ["--version"] },
+    { name: `${engineLabel} Compose`, command: doctorEngine, args: ["compose", "version"] },
+    { name: `${engineLabel} Engine`, command: doctorEngine, args: ["info"] }
   ]) {
     const code = dockerReady
       ? 0
@@ -2655,6 +2677,7 @@ function spawnTrustedCommand(spec, options) {
   switch (spec.command) {
     case "codesign": return spawn("codesign", args, options);
     case "docker": return spawn("docker", args, options);
+    case "podman": return spawn("podman", args, options);
     case "hdiutil": return spawn("hdiutil", args, options);
     case "open": return spawn("open", args, options);
     case "powershell.exe":
@@ -2791,6 +2814,7 @@ Usage: ${UNIVERSAL_COMMAND} <command>
   uninstall [--purge-data]          Remove containers; keep data by default
 
 Options:
+  --engine <auto|docker|podman>     Select container engine (or set SPACEAPP_CONTAINER_ENGINE)
   --plan                            Dry-run mode: print actions without executing
   --json                            Output structured JSON where supported
   --log-file <file>                 Append all execution logs to specified file
