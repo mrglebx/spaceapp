@@ -118,6 +118,18 @@ Host-root is supported only on Linux. Run
 `npx --yes run-spaceapp@latest install --access isolated` to remove the host
 mount while keeping SpaceApp data and volumes.
 
+On Linux hosts with rootless Podman (`podman` and `podman compose`), the launcher automatically falls back to Podman when Docker is absent, or you can select it explicitly with `--engine podman` or `SPACEAPP_CONTAINER_ENGINE=podman`:
+
+```bash
+npx --yes run-spaceapp@latest install --engine podman
+```
+
+For writable bind-mounted workspaces under rootless Podman, map the container CLI user (`10001:10001`) inside your user namespace without root privileges:
+
+```bash
+podman unshare chown -R 10001:10001 /path/to/workspace
+```
+
 Provider API keys are read from masked standard input and written to
 restrictive files outside Git. OAuth and device-code credentials remain in
 isolated Docker provider state. Neither credential source is included in
