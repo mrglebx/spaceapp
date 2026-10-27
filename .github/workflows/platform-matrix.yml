@@ -57,3 +57,29 @@ jobs:
       - run: npm run check -w run-spaceapp
       - run: npm run pack:dry-run -w run-spaceapp
       - run: node packages/run-spaceapp/bin/spaceapp.mjs --version
+
+  podman-rootless:
+    name: Launcher / ubuntu-latest / Rootless Podman
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.23.0"
+          cache: npm
+
+      - name: Verify rootless Podman on runner
+        run: |
+          podman --version
+          podman info --format '{{json .Host.Security.Rootless}}'
+
+      - run: npm ci
+      - name: Run Podman engine unit and lifecycle suite
+        env:
+          SPACEAPP_CONTAINER_ENGINE: podman
+        run: node --test packages/run-spaceapp/tests/podman.test.mjs
+      - run: npm run check -w run-spaceapp
