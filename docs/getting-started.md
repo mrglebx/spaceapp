@@ -39,6 +39,20 @@ starts the service. Before adding the current user to the `docker` group, it
 explains that the group grants root-level privileges, adds the user
 automatically, and continues in the same command.
 
+### Rootless Podman on Linux
+
+On Fedora, RHEL, CentOS Stream, Debian, Ubuntu, and Arch-family hosts where rootless Podman (`podman` and `podman compose`) is installed instead of the rootful Docker daemon, `run-spaceapp` detects rootless Podman automatically or accepts `--engine podman` (`SPACEAPP_CONTAINER_ENGINE=podman`):
+
+```bash
+npx --yes run-spaceapp@latest install --engine podman
+```
+
+The selected `containerEngine` (`"docker"` or `"podman"`) is persisted in `config.json` and used across `up`, `down`, `status`, `logs`, `doctor`, `backup`, `restore`, `update`, and `uninstall`. When registering a writable workspace under rootless Podman, map UID/GID `10001:10001` in your user namespace without root:
+
+```bash
+podman unshare chown -R 10001:10001 /path/to/workspace
+```
+
 ## macOS
 
 Install Node.js 20.11 or newer, then run in Terminal:
