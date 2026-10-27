@@ -136,6 +136,10 @@ export async function ensureDockerAvailable({
   scheduleResume = scheduleWindowsInstallResume,
   confirmRestart = confirmWindowsRestart
 }) {
+  const preferredEngine = installArgs?.requestedEngine ?? env?.SPACEAPP_CONTAINER_ENGINE;
+  if (preferredEngine === "podman") {
+    return ensureLinuxPodman({ env, stdin, stdout, stderr, execute, sleep });
+  }
   if (await dockerIsReady(execute)) {
     return { code: 0, reexecuted: false };
   }
@@ -652,6 +656,73 @@ async function dockerCliAndComposeAreAvailable(execute) {
     }
   }
   return true;
+}
+
+
+export async function podmanCliAndComposeAreAvailable(execute) {
+  for (const spec of [
+    { command: "podman", args: ["--version"] },
+    { command: "podman", args: ["compose", "version"] }
+  ]) {
+    if (await execute(spec, { stdout: null, stderr: null }) !== 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export async function podmanIsReady(execute) {
+  for (const spec of [
+    { command: "podman", args: ["--version"] },
+    { command: "podman", args: ["compose", "version"] },
+    { command: "podman", args: ["info"] }
+  ]) {
+    if (await execute(spec, { stdout: null, stderr: null }) !== 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export async function detectContainerEngine({
+  execute,
+  env = process.env,
+  preferredEngine
+} = {}) {
+  const requested = preferredEngine ?? env?.SPACEAPP_CONTAINER_ENGINE ?? "auto";
+  if (requested === "docker") return "docker";
+  if (requested === "podman") return "podman";
+  if (requested !== "auto") {
+    throw new Error("Container engine must be auto, docker, or podman.");
+  }
+  if (await dockerIsReady(execute)) return "docker";
+  if (await podmanIsReady(execute)) return "podman";
+  if (await dockerCliAndComposeAreAvailable(execute)) return "docker";
+  if (await podmanCliAndComposeAreAvailable(execute)) return "podman";
+  return "docker";
+}
+
+async function ensureLinuxPodman({
+  stdin,
+  stdout,
+  stderr,
+  execute
+}) {
+  if (await podmanIsReady(execute)) {
+    stdout?.write("Rootless Podman engine is ready.\n");
+    return { code: 0, reexecuted: false };
+  }
+  const cliOk = await podmanCliAndComposeAreAvailable(execute);
+  if (!cliOk) {
+    stderr?.write(
+      "Podman and a Compose provider (podman-compose or docker-compose) are required when --engine podman is selected.\n"
+    );
+    return { code: 1, reexecuted: false };
+  }
+  stderr?.write(
+    "Podman CLI is installed, but rootless Podman could not complete 'podman info'. Verify subuid/subgid mappings (/etc/subuid, /etc/subgid).\n"
+  );
+  return { code: 1, reexecuted: false };
 }
 
 async function dockerIsReady(execute) {
